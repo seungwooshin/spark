@@ -22,21 +22,22 @@ import scala.math.sqrt
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.graphx._
 import org.apache.spark.graphx.util.GraphGenerators
+import org.apache.spark.rdd._
 
 
 class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
   def compareScores(a: VertexRDD[(Double, Double)], b: VertexRDD[(Double, Double)]): Double = {
     a.leftJoin(b) {
-      case (id, (hub1, auth1), (hub2, auth2)) =>
-        (hub1 - hub2.getOrElse(0.0)) * (hub1 - hub2.getOrElse(0.0)) +
-        (auth1 - auth2.getOrElse(0.0)) * (auth1 - auth2.getOrElse(0.0))
+      case (id, (hub1, auth1), ha2Opt) => ha2Opt.getOrElse((0.0, 0.0)) match {
+        case (hub2, auth2) => (hub1 - hub2) * (hub1 - hub2) + (auth1 - auth2) * (auth1 - auth2)
+      }
     }.map { case (id, error) => error }.sum()
   }
 
   test("Star HITS") {
     withSpark { sc =>
-      val nVertices = 100
+      val nVertices = 10
       val starGraph = GraphGenerators.starGraph(sc, nVertices).cache()
       val errorTol = 1.0e-5
 
@@ -48,7 +49,11 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
       val referenceHA = VertexRDD(sc.parallelize(
         (0 until nVertices).map {
-          x => if (x == 0) (x, (0, 1)) else (x, (1.0 / sqrt(nVertices), 0))
+          x => if (x == 0) {
+            (x.toLong, (0.0, 1.0))
+          } else {
+            (x.toLong, (1.0 / sqrt(nVertices - 1), 0.0))
+          }
         })).cache()
 
       assert(compareScores(staticHA1, referenceHA) < errorTol)
@@ -57,7 +62,7 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
   test("Reverse Star HITS") {
     withSpark { sc =>
-      val nVertices = 100
+      val nVertices = 10
       val starGraph = GraphGenerators.starGraph(sc, nVertices).reverse.cache()
       val errorTol = 1.0e-5
 
@@ -69,7 +74,11 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
       val referenceHA = VertexRDD(sc.parallelize(
         (0 until nVertices).map {
-          x => if (x == 0) (x, (1, 0)) else (x, (0, 1.0 / sqrt(nVertices)))
+          x => if (x == 0) {
+            (x.toLong, (1.0, 0.0))
+          } else {
+            (x.toLong, (0.0, 1.0 / sqrt(nVertices - 1)))
+          }
         })).cache()
 
       assert(compareScores(staticHA1, referenceHA) < errorTol)
@@ -78,24 +87,26 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
   test("Chain HITS") {
     withSpark { sc =>
-      val nVertices = 100
-      val chain1 = (0 until nVertices).map(x => (x, x + 1))
+      val nVertices = 10
+      val chain1 = (0 until (nVertices - 1)).map(x => (x, x + 1))
       val rawEdges = sc.parallelize(chain1, 1).map { case (s, d) => (s.toLong, d.toLong) }
       val chain = Graph.fromEdgeTuples(rawEdges, 1.0).cache()
       val errorTol = 1.0e-5
 
-      val staticHA1 = starGraph.staticHITS(1).vertices.cache()
-      val staticHA2 = starGraph.staticHITS(2).vertices.cache()
+      val staticHA1 = chain.staticHITS(1).vertices.cache()
+      val staticHA2 = chain.staticHITS(2).vertices.cache()
 
       // Static HITS should only take 1 iteration to converge
       assert(compareScores(staticHA1, staticHA2) < errorTol)
 
       val referenceHA = VertexRDD(sc.parallelize(
         (0 until nVertices).map {
-          x => x match {
-            case 0 => (x, (1.0 / sqrt(nVertices), 0))
-            case nVertices => (x, (0, 1.0 / sqrt(nVertices)))
-            case _ => (x, (1.0 / sqrt(nVertices), 1.0 / sqrt(nVertices)))
+          x => if (x == nVertices - 1) {
+            (x.toLong, (0.0, 1.0 / sqrt(nVertices - 1)))
+          } else if (x == 0) {
+            (x.toLong, (1.0 / sqrt(nVertices - 1), 0.0))
+          } else {
+            (x.toLong, (1.0 / sqrt(nVertices - 1), 1.0 / sqrt(nVertices - 1)))
           }
         })).cache()
 
@@ -125,12 +136,13 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val defaultUser = ("John Doe", "Missing")
       // Build the initial Graph
       val graph = Graph(users, relationships, defaultUser)
-      val numIter = 100
+      val numIter = 20
+      val errorTol = 1.0e-5
 
-      val staticHA = starGraph.staticHITS(numIter).vertices.cache()
+      val staticHA = graph.staticHITS(numIter).vertices.cache()
       val referenceHA = VertexRDD(sc.parallelize(
-        List((0L, (0.0, 0.7071068)), (2L, (0.0, 0.0)), (3L, (0.0, 0.5)), (4L, (0.3826834, 0.0)),
-          (5L, (0.9238795, 0.0)), (7L, (0.0, 0.5))))).cache()
+        List((0L, (0.0, 0.6279630)), (2L, (0.0, 0.0)), (3L, (0.3250576, 0.4597008)),
+          (4L, (0.3250576, 0.0)), (5L, (0.8880738, 0.0)), (7L, (0.0, 0.6279630))))).cache()
 
       assert(compareScores(staticHA, referenceHA) < errorTol)
     }

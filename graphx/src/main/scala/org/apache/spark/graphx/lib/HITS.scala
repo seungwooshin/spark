@@ -71,15 +71,19 @@ object HITS {
     // Initialize the hubs and authorities graph with each vertex having
     // the hub score of 1 and the authority score of 1.
     var haGraph: Graph[(Double, Double), ED] = graph
-      .mapVertices { case (_, _) => (1, 1) }
-      .cache()
+      .mapVertices { case (_, _) => (1.0, 1.0) }
 
     // If the outdegree or indegree of a vertex is zero, set the hub score
     // or authority score of the vertex to be zero, respectively.
-    haGraph = haGraph.joinVertices(haGraph.inDegrees.zip(haGraph.outDegrees)) {
-      case (id, (hub, authority), (inDegree, outDegree)) =>
-        (if (outDegree == 0) 0 else hub, if (inDegree == 0) 0 else authority)
+    val degrees = haGraph.vertices.leftZipJoin(haGraph.inDegrees) {
+      (id, va, inDegreeOpt) => inDegreeOpt.getOrElse(0)
+    }.leftZipJoin(haGraph.outDegrees) {
+      (id, inDegree, outDegreeOpt) => (inDegree, outDegreeOpt.getOrElse(0))
     }
+    haGraph = haGraph.joinVertices(degrees) {
+      case (id, (hub, authority), (inDegree, outDegree)) =>
+        (if (outDegree == 0) 0.0 else hub, if (inDegree == 0) 0.0 else authority)
+    }.cache()
 
     val srcOnly = new TripletFields(true, false, false)
     val dstOnly = new TripletFields(false, true, false)
