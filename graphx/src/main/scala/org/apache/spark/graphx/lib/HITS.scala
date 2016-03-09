@@ -108,6 +108,8 @@ object HITS {
         case (_, (hub, authority)) =>
           (hub / sqrt(sumHubSquare), authority / sqrt(sumAuthSquare))
       }.cache()
+
+      // Unpersist intermediate RDDs for faster garbage collection
       materialize(haGraph)
       unpersist(intermediateGraph1)
       unpersist(intermediateGraph2)
