@@ -30,11 +30,14 @@ import org.apache.spark.graphx._
  * vertex's links to other vertices, whereas the authority score estimates the
  * value of the vertex's content. Hence, a good hub is a vertex that links to many
  * authorities, and a good authority is a vertex that is linked by many hubs.
- * 
+ *
  * The algorithm is straightforward and can be described as follows:
  *
- * Initialize every vertex's hub score and authority score to be 1.
- * For some fixed number of steps, repeat the following:
+ * Initialize every vertex's hub score and authority score to be 1. If the outdegree
+ * or indegree of a vertex is zero, then initialize the hub score or authority score
+ * of the vertex to be also zero, respectively.
+ *
+ * For a fixed number of steps, repeat the following:
  * <ul>
  * <li> Update each vertex's authority score to be the sum of the hub scores
  *      of each node that links to it.
@@ -65,9 +68,18 @@ object HITS {
   def run[VD: ClassTag, ED: ClassTag](
     graph: Graph[VD, ED], numIter: Int): Graph[(Double, Double), ED] =
   {
-    // Initialize the hubs and authoroities graph with each vertex having
+    // Initialize the hubs and authorities graph with each vertex having
     // the hub score of 1 and the authority score of 1.
-    var haGraph: Graph[(Double, Double), ED] = graph.mapVertices { case (_, _) => (1, 1) }
+    var haGraph: Graph[(Double, Double), ED] = graph
+      .mapVertices { case (_, _) => (1, 1) }
+      .cache()
+
+    // If the outdegree or indegree of a vertex is zero, set the hub score
+    // or authority score of the vertex to be zero, respectively.
+    haGraph = haGraph.joinVertices(haGraph.inDegrees.zip(haGraph.outDegrees)) {
+      case (id, (hub, authority), (inDegree, outDegree)) =>
+        (if (outDegree == 0) 0 else hub, if (inDegree == 0) 0 else authority)
+    }
 
     val srcOnly = new TripletFields(true, false, false)
     val dstOnly = new TripletFields(false, true, false)
@@ -114,7 +126,7 @@ object HITS {
       unpersist(intermediateGraph1)
       unpersist(intermediateGraph2)
       unpersist(intermediateGraph3)
-      
+
       iteration += 1
     }
 

@@ -415,7 +415,7 @@ class GraphOps[VD: ClassTag, ED: ClassTag](graph: Graph[VD, ED]) extends Seriali
   }
 
   /**
-   * Run Hypertext-Induced Topic Search algorithm for a fixed number of iterations 
+   * Run Hypertext-Induced Topic Search algorithm for a fixed number of iterations
    * returning a graph with vertex attributes containing pairs of the hub score
    * and the authority score.
    *
