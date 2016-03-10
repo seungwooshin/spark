@@ -27,12 +27,21 @@ import org.apache.spark.rdd._
 
 class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
-  def compareScores(a: VertexRDD[(Double, Double)], b: VertexRDD[(Double, Double)]): Double = {
-    a.leftJoin(b) {
+  def compareScores(
+      a: VertexRDD[(Double, Double)],
+      b: VertexRDD[(Double, Double)],
+      errorTol: Double): Unit = {
+    val errors = a.leftJoin(b) {
       case (id, (hub1, auth1), ha2Opt) => ha2Opt.getOrElse((0.0, 0.0)) match {
-        case (hub2, auth2) => (hub1 - hub2) * (hub1 - hub2) + (auth1 - auth2) * (auth1 - auth2)
+        case (hub2, auth2) => ((hub1 - hub2) * (hub1 - hub2), (auth1 - auth2) * (auth1 - auth2))
       }
-    }.map { case (id, error) => error }.sum()
+    }.filter {
+      case (id, (h, a)) => (h > errorTol) || (a > errorTol)
+    }
+    if (errors.count() > 0) {
+      val (id, (h, a)) = errors.take(1)(0)
+      assert(false, "Found error of (" + h + ", " + a + ") at vertex " + id)
+    }
   }
 
   test("Star HITS") {
@@ -45,8 +54,12 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val staticHA2 = starGraph.staticHITS(2).vertices.cache()
 
       // Static HITS should only take 1 iteration to converge
-      assert(compareScores(staticHA1, staticHA2) < errorTol)
+      compareScores(staticHA1, staticHA2, errorTol)
 
+      // Since the star graph consists of the edges of the form (i, 0) for i = 1...(n-1),
+      // it is clear that the authority score of every vertex but 0 is zero and that the
+      // hub and authority scores of vertex 0 are 0.0 and 1.0 respectively. By symmetry,
+      // the scores for all other vertices must be (1/sqrt(n-1), 0.0)
       val referenceHA = VertexRDD(sc.parallelize(
         (0 until nVertices).map {
           x => if (x == 0) {
@@ -56,7 +69,7 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
           }
         })).cache()
 
-      assert(compareScores(staticHA1, referenceHA) < errorTol)
+      compareScores(staticHA1, referenceHA, errorTol)
     }
   } // end of test Star HITS
 
@@ -70,8 +83,12 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val staticHA2 = starGraph.staticHITS(2).vertices.cache()
 
       // Static HITS should only take 1 iteration to converge
-      assert(compareScores(staticHA1, staticHA2) < errorTol)
+      compareScores(staticHA1, staticHA2, errorTol)
 
+      // Since the reverse star consists of the edges of the form (0, i) for i = 1...(n-1),
+      // it is clear that the hub score of every vertex but 0 is zero and that the
+      // hub and authority scores of vertex 0 are 1.0 and 0.0 respectively. By symmetry,
+      // the scores for all other vertices must be (0.0, 1/sqrt(n-1))
       val referenceHA = VertexRDD(sc.parallelize(
         (0 until nVertices).map {
           x => if (x == 0) {
@@ -81,9 +98,31 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
           }
         })).cache()
 
-      assert(compareScores(staticHA1, referenceHA) < errorTol)
+      compareScores(staticHA1, referenceHA, errorTol)
     }
   } // end of test Reverse Star HITS
+
+  test("Complete Graph HITS") {
+    withSpark { sc =>
+      val nVertices = 5
+      val numIter = 30
+      val cartProduct =
+        for (i <- 0 to (nVertices - 1); j <- 0 to (nVertices - 1)) yield (i.toLong, j.toLong)
+      val rawEdges = sc.parallelize(cartProduct.filter { case (i, j) => i != j }, 1)
+      val graph = Graph.fromEdgeTuples(rawEdges, 1.0).cache()
+      val errorTol = 1.0e-5
+
+      val staticHA = graph.staticHITS(numIter).vertices.cache()
+
+      // By symmetry, all hub and authority scores must be 1/sqrt(n)
+      val referenceHA = VertexRDD(sc.parallelize(
+        (0 until nVertices).map {
+          x => (x.toLong, (1.0 / sqrt(nVertices), 1.0 / sqrt(nVertices)))
+        })).cache()
+
+      compareScores(staticHA, referenceHA, errorTol)
+    }
+  }
 
   test("Chain HITS") {
     withSpark { sc =>
@@ -97,8 +136,13 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val staticHA2 = chain.staticHITS(2).vertices.cache()
 
       // Static HITS should only take 1 iteration to converge
-      assert(compareScores(staticHA1, staticHA2) < errorTol)
+      compareScores(staticHA1, staticHA2, errorTol)
 
+      // Since the chain consists of the edges of the form (i, i + 1) for i = 0...(n-1),
+      // it is clear that the authority score of vertex 0 and the hub score of vertex (n-1) are
+      // zero. After the first round, vertices 0..(n-2) have equal hub scores and vertices
+      // 1..(n-1) have equal authority scores. It is a straightforward observation that
+      // the scores will never fluctuate afterwards.
       val referenceHA = VertexRDD(sc.parallelize(
         (0 until nVertices).map {
           x => if (x == nVertices - 1) {
@@ -110,7 +154,7 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
           }
         })).cache()
 
-      assert(compareScores(staticHA1, referenceHA) < errorTol)
+      compareScores(staticHA1, referenceHA, errorTol)
     }
   }
 
@@ -140,11 +184,13 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val errorTol = 1.0e-5
 
       val staticHA = graph.staticHITS(numIter).vertices.cache()
+
+      // The following numerical values were computed "by hand" from Python interactive shell.
       val referenceHA = VertexRDD(sc.parallelize(
         List((0L, (0.0, 0.6279630)), (2L, (0.0, 0.0)), (3L, (0.3250576, 0.4597008)),
           (4L, (0.3250576, 0.0)), (5L, (0.8880738, 0.0)), (7L, (0.0, 0.6279630))))).cache()
 
-      assert(compareScores(staticHA, referenceHA) < errorTol)
+      compareScores(staticHA, referenceHA, errorTol)
     }
   } // end of toy HITS
 

@@ -17,6 +17,7 @@
 
 package org.apache.spark.graphx.lib
 
+import scala.math.max
 import scala.math.sqrt
 import scala.reflect.ClassTag
 
@@ -73,46 +74,15 @@ object HITS {
     var haGraph: Graph[(Double, Double), ED] = graph
       .mapVertices { case (_, _) => (1.0, 1.0) }
 
-    // If the outdegree or indegree of a vertex is zero, set the hub score
-    // or authority score of the vertex to be zero, respectively.
-    val degrees = haGraph.vertices.leftZipJoin(haGraph.inDegrees) {
-      (id, va, inDegreeOpt) => inDegreeOpt.getOrElse(0)
-    }.leftZipJoin(haGraph.outDegrees) {
-      (id, inDegree, outDegreeOpt) => (inDegree, outDegreeOpt.getOrElse(0))
-    }
-    haGraph = haGraph.joinVertices(degrees) {
-      case (id, (hub, authority), (inDegree, outDegree)) =>
-        (if (outDegree == 0) 0.0 else hub, if (inDegree == 0) 0.0 else authority)
-    }.cache()
+    // Variables needed for implementation of lazy normalization
+    var boundSquare: Double = 1.0
+    val nVertices = graph.numVertices
+    val maxDegree = max(graph.inDegrees.max()._2, graph.outDegrees.max()._2)
 
-    val srcOnly = new TripletFields(true, false, false)
-    val dstOnly = new TripletFields(false, true, false)
-
-    var iteration = 0
-    var intermediateGraph1: Graph[(Double, Double), ED] = null
-    var intermediateGraph2: Graph[(Double, Double), ED] = null
-    var intermediateGraph3: Graph[(Double, Double), ED] = null
-    while (iteration < numIter) {
-      haGraph.cache()
-
-      // Update authority scores using hub scores of in-neighbors.
-      intermediateGraph1 = haGraph
-      val authorityUpdates = haGraph.aggregateMessages[Double](
-        ctx => ctx.sendToDst(ctx.srcAttr._1), _ + _, srcOnly)
-      haGraph = haGraph.joinVertices(authorityUpdates) {
-        case (id, (oldHub, oldAuthority), newAuthority) => (oldHub, newAuthority)
-      }.cache()
-
-      // Update hub scores using authority scores of out-neighbors.
-      intermediateGraph2 = haGraph
-      val hubUpdates = haGraph.aggregateMessages[Double](
-        ctx => ctx.sendToSrc(ctx.dstAttr._2), _ + _, dstOnly)
-      haGraph = haGraph.joinVertices(hubUpdates) {
-        case (id, (oldHub, oldAuthority), newHub) => (newHub, oldAuthority)
-      }.cache()
-
+    def normalize(): Unit = {
       // Compute the sum of squares of each score and then renormalize.
-      intermediateGraph3 = haGraph
+      var intermediateGraph: Graph[(Double, Double), ED] = haGraph
+      intermediateGraph = haGraph
       val (_, (sumHubSquare, sumAuthSquare)) = haGraph.vertices
         .mapValues {
           ha => (ha._1 * ha._1, ha._2 * ha._2)
@@ -120,20 +90,70 @@ object HITS {
           case ((_, (hub1, authority1)), (_, (hub2, authority2))) =>
             (0, ((hub1 + hub2), (authority1 + authority2)))
         }
+      val (sqrtSumHubSquare, sqrtSumAuthSquare) = (sqrt(sumHubSquare), sqrt(sumAuthSquare))
       haGraph = haGraph.mapVertices {
         case (_, (hub, authority)) =>
-          (hub / sqrt(sumHubSquare), authority / sqrt(sumAuthSquare))
+          (hub / sqrtSumHubSquare, authority / sqrtSumAuthSquare)
+      }.cache()
+      materialize(haGraph)
+      unpersist(intermediateGraph)
+    }
+
+    def lazyNormalize(): Unit = {
+      // Variable boundSquare stores an upper bound on the square of the maximum score as of now.
+      // (either hub or authority)
+      // After another round of update, our new bound will be
+      // (sqrt(boundSquare) * maxDegree)^2 = boundSquare * maxDegree^2.
+      // So we want to check whether the above value times nVertices will overflow.
+      if (boundSquare >= Double.MaxValue / maxDegree / maxDegree / nVertices) {
+        // If so, we want to normalize at this step.
+        normalize()
+        boundSquare = 1.0
+      } else {
+        boundSquare *= maxDegree * maxDegree
+      }
+    }
+
+    val srcOnly = new TripletFields(true, false, false)
+    val dstOnly = new TripletFields(false, true, false)
+
+    var iteration = 0
+    while (iteration < numIter) {
+      var intermediateGraph1: Graph[(Double, Double), ED] = null
+      var intermediateGraph2: Graph[(Double, Double), ED] = null
+
+      haGraph.cache()
+
+      // Update authority scores using hub scores of in-neighbors.
+      lazyNormalize()
+      intermediateGraph1 = haGraph
+      val authorityUpdates = haGraph.aggregateMessages[Double](
+        ctx => ctx.sendToDst(ctx.srcAttr._1), _ + _, srcOnly)
+      haGraph = haGraph.outerJoinVertices(authorityUpdates) {
+        case (id, (oldHub, oldAuthority), newAuthorityOpt) =>
+          (oldHub, newAuthorityOpt.getOrElse(0.0))
+      }.cache()
+
+      // Update hub scores using authority scores of out-neighbors.
+      lazyNormalize()
+      intermediateGraph2 = haGraph
+      val hubUpdates = haGraph.aggregateMessages[Double](
+        ctx => ctx.sendToSrc(ctx.dstAttr._2), _ + _, dstOnly)
+      haGraph = haGraph.outerJoinVertices(hubUpdates) {
+        case (id, (oldHub, oldAuthority), newHubOpt) =>
+          (newHubOpt.getOrElse(0.0), oldAuthority)
       }.cache()
 
       // Unpersist intermediate RDDs for faster garbage collection
       materialize(haGraph)
       unpersist(intermediateGraph1)
       unpersist(intermediateGraph2)
-      unpersist(intermediateGraph3)
 
       iteration += 1
     }
 
+    // Have to normalize before returning
+    normalize()
     haGraph
   }
 
@@ -141,8 +161,8 @@ object HITS {
    * Forces materialization of a Graph
    */
   private def materialize(g: Graph[_, _]): Unit = {
-    g.vertices.foreachPartition(x => {})
-    g.edges.foreachPartition(x => {})
+    g.vertices.count()
+    g.edges.count()
   }
 
   /**

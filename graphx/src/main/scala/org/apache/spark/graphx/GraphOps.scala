@@ -415,9 +415,10 @@ class GraphOps[VD: ClassTag, ED: ClassTag](graph: Graph[VD, ED]) extends Seriali
   }
 
   /**
-   * Run Hypertext-Induced Topic Search algorithm for a fixed number of iterations
-   * returning a graph with vertex attributes containing pairs of the hub score
-   * and the authority score.
+   * Run Hypertext-Induced Topic Search algorithm
+   * ([[http://en.wikipedia.org/wiki/HITS_algorithm]])
+   * for a fixed number of iterations returning a graph with vertex attributes
+   * containing pairs of the hub score and the authority score.
    *
    * @see [[org.apache.spark.graphx.lib.HITS$#run]]
    */
